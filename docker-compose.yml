@@ -1,0 +1,161 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: intelligent-file-deduplication-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-file_deduplication}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mysqladmin",
+          "ping",
+          "-h",
+          "localhost",
+          "-u",
+          "root",
+          "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - dedup-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: intelligent-file-deduplication-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - dedup-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: intelligent-file-deduplication-backend
+    restart: unless-stopped
+    environment:
+      APP_NAME: Intelligent File Deduplication System
+      APP_ENV: production
+      DEBUG: "false"
+      HOST: 0.0.0.0
+      PORT: 8000
+      DATABASE_URL: mysql+pymysql://root:${MYSQL_ROOT_PASSWORD:-rootpassword}@mysql:3306/${MYSQL_DATABASE:-file_deduplication}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-production-secret}
+      JWT_ALGORITHM: HS256
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      STORAGE_ROOT: storage
+      UPLOAD_DIRECTORY: uploads
+      TEMP_DIRECTORY: temp
+      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-1024}
+      ALLOWED_EXTENSIONS: pdf,doc,docx,txt,csv,xls,xlsx,ppt,pptx,jpg,jpeg,png,gif,zip,rar,7z
+      CORS_ORIGINS: http://localhost:18002
+    ports:
+      - "18001:8000"
+    volumes:
+      - file_storage:/app/storage
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=5)"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - dedup-network
+
+  celery-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: intelligent-file-deduplication-celery
+    restart: unless-stopped
+    command:
+      [
+        "celery",
+        "-A",
+        "app.core.celery_app:celery_app",
+        "worker",
+        "--pool=solo",
+        "--loglevel=info"
+      ]
+    environment:
+      APP_NAME: Intelligent File Deduplication System
+      APP_ENV: production
+      DEBUG: "false"
+      HOST: 0.0.0.0
+      PORT: 8000
+      DATABASE_URL: mysql+pymysql://root:${MYSQL_ROOT_PASSWORD:-rootpassword}@mysql:3306/${MYSQL_DATABASE:-file_deduplication}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-this-production-secret}
+      JWT_ALGORITHM: HS256
+      JWT_ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      STORAGE_ROOT: storage
+      UPLOAD_DIRECTORY: uploads
+      TEMP_DIRECTORY: temp
+      MAX_FILE_SIZE_MB: ${MAX_FILE_SIZE_MB:-1024}
+      ALLOWED_EXTENSIONS: pdf,doc,docx,txt,csv,xls,xlsx,ppt,pptx,jpg,jpeg,png,gif,zip,rar,7z
+      CORS_ORIGINS: http://localhost:18002
+    volumes:
+      - file_storage:/app/storage
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - dedup-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:18001/api/v1
+    container_name: intelligent-file-deduplication-frontend
+    restart: unless-stopped
+    ports:
+      - "18002:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - dedup-network
+
+volumes:
+  mysql_data:
+  redis_data:
+  file_storage:
+
+networks:
+  dedup-network:
+    driver: bridge
